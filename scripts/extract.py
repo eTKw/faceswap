@@ -39,6 +39,11 @@ class Extract():
             self.save_interval = self.args.save_interval
         logger.debug("Initialized %s", self.__class__.__name__)
 
+    @property
+    def skip_num(self):
+        """ Number of frames to skip if extract_every_n is passed """
+        return self.args.extract_every_n if hasattr(self.args, "extract_every_n") else 1
+
     def process(self):
         """ Perform the extraction process """
         logger.info('Starting, this may take a while...')
@@ -49,7 +54,7 @@ class Extract():
         self.run_extraction()
         save_thread.join()
         self.alignments.save()
-        Utils.finalize(self.images.images_found,
+        Utils.finalize(self.images.images_found // self.skip_num,
                        self.alignments.faces_count,
                        self.verify_output)
 
@@ -71,10 +76,16 @@ class Extract():
         """ Load the images """
         logger.debug("Load Images: Start")
         load_queue = queue_manager.get_queue("load")
+        idx = 0
         for filename, image in self.images.load():
+            idx += 1
             if load_queue.shutdown.is_set():
                 logger.debug("Load Queue: Stop signal received. Terminating")
                 break
+            if idx % self.skip_num != 0:
+                logger.trace("Skipping image '%s' due to extract_every_n = %s",
+                             filename, self.skip_num)
+                continue
             if image is None or not image.any():
                 logger.warning("Unable to open image. Skipping: '%s'", filename)
                 continue
@@ -184,7 +195,7 @@ class Extract():
         if processed != 0 and self.args.skip_faces:
             logger.info("Skipping frames with detected faces: %s", processed)
 
-        to_process = self.images.images_found - processed
+        to_process = (self.images.images_found - processed) // self.skip_num
         logger.debug("Items to be Processed: %s", to_process)
         if to_process == 0:
             logger.error("No frames to process. Exiting")
@@ -309,13 +320,14 @@ class Plugins():
             detector_name = self.converter_args["detector"]
         logger.debug("Loading Detector: '%s'", detector_name)
         # Rotation
-        rotation = None
-        if hasattr(self.args, "rotate_images"):
-            rotation = self.args.rotate_images
+        rotation = self.args.rotate_images if hasattr(self.args, "rotate_images") else None
+        # Min acceptable face size:
+        min_size = self.args.min_size if hasattr(self.args, "min_size") else 0
 
         detector = PluginLoader.get_detector(detector_name)(
             loglevel=self.loglevel,
-            rotation=rotation)
+            rotation=rotation,
+            min_size=min_size)
 
         return detector
 
@@ -342,6 +354,7 @@ class Plugins():
 
         self.process_align = SpawnProcess(self.aligner.run, **kwargs)
         event = self.process_align.event
+        error = self.process_align.error
         self.process_align.start()
 
         # Wait for Aligner to take it's VRAM
@@ -349,10 +362,15 @@ class Plugins():
         # up to 3-4 minutes, hence high timeout.
         # TODO investigate why this is and fix if possible
         for mins in reversed(range(5)):
-            event.wait(60)
+            for seconds in range(60):
+                event.wait(seconds)
+                if event.is_set():
+                    break
+                if error.is_set():
+                    break
             if event.is_set():
                 break
-            if mins == 0:
+            if mins == 0 or error.is_set():
                 raise ValueError("Error initializing Aligner")
             logger.info("Waiting for Aligner... Time out in %s minutes", mins)
 
@@ -369,10 +387,8 @@ class Plugins():
         mp_func = PoolProcess if self.detector.parent_is_pool else SpawnProcess
         self.process_detect = mp_func(self.detector.run, **kwargs)
 
-        event = None
-        if hasattr(self.process_detect, "event"):
-            event = self.process_detect.event
-
+        event = self.process_detect.event if hasattr(self.process_detect, "event") else None
+        error = self.process_detect.error if hasattr(self.process_detect, "error") else None
         self.process_detect.start()
 
         if event is None:
@@ -380,10 +396,15 @@ class Plugins():
             return
 
         for mins in reversed(range(5)):
-            event.wait(60)
+            for seconds in range(60):
+                event.wait(seconds)
+                if event.is_set():
+                    break
+                if error and error.is_set():
+                    break
             if event.is_set():
                 break
-            if mins == 0:
+            if mins == 0 or (error and error.is_set()):
                 raise ValueError("Error initializing Detector")
             logger.info("Waiting for Detector... Time out in %s minutes", mins)
 

@@ -13,9 +13,8 @@ from subprocess import CalledProcessError, run, PIPE, Popen
 
 INSTALL_FAILED = False
 # Revisions of tensorflow-gpu and cuda/cudnn requirements
-TENSORFLOW_REQUIREMENTS = {"1.2": ["8.0", "5.1"],
-                           "1.4": ["8.0", "6.0"],
-                           "1.12": ["9.0", "7.2"]}
+TENSORFLOW_REQUIREMENTS = {"==1.12.0": ["9.0", "7.2"],
+                           ">=1.13.1": ["10.0", "7.4"]}
 
 
 class Environment():
@@ -179,11 +178,13 @@ class Environment():
     def get_installed_packages(self):
         """ Get currently installed packages """
         installed_packages = dict()
-        chk = Popen("{} -m pip freeze".format(sys.executable),
+        chk = Popen("\"{}\" -m pip freeze".format(sys.executable),
                     shell=True, stdout=PIPE)
         installed = chk.communicate()[0].decode(self.encoding).splitlines()
 
         for pkg in installed:
+            if "==" not in pkg:
+                continue
             item = pkg.split("==")
             installed_packages[item[0]] = item[1]
         return installed_packages
@@ -219,11 +220,12 @@ class Environment():
                 tf_ver = key
                 break
         if tf_ver:
-            tf_ver = "tensorflow-gpu=={}.0".format(tf_ver)
+            tf_ver = "tensorflow-gpu{}".format(tf_ver)
             self.required_packages.append(tf_ver)
             return
 
         self.output.warning(
+            "The minimum Tensorflow requirement is 1.12. \n"
             "Tensorflow currently has no official prebuild for your CUDA, cuDNN "
             "combination.\nEither install a combination that Tensorflow supports or "
             "build and install your own tensorflow-gpu.\r\n"
@@ -631,7 +633,7 @@ class Install():
         """ Install required conda packages """
         self.output.info("Installing Required Conda Packages. This may take some time...")
         for pkg in self.env.conda_missing_packages:
-            channel = None if len(pkg) !=2 else pkg[1]
+            channel = None if len(pkg) != 2 else pkg[1]
             self.conda_installer(pkg[0], channel=channel, conda_only=True)
 
     def conda_installer(self, package, channel=None, verbose=False, conda_only=False):
@@ -668,12 +670,10 @@ class Install():
         if not self.env.is_admin and not self.env.is_virtualenv:
             pipexe.append("--user")
         if package.startswith("dlib"):
-            opt = "yes" if self.env.enable_cuda else "no"
-            pipexe.extend(["--install-option=--{}".format(opt),
-                           "--install-option=DLIB_USE_CUDA"])
+            if not self.env.enable_cuda:
+                pipexe.extend(["--install-option=--no", "--install-option=DLIB_USE_CUDA"])
             if self.env.os_version[0] == "Windows":
-                pipexe.extend(["--global-option=-G",
-                               "--global-option=Visual Studio 14 2015"])
+                pipexe.extend(["--global-option=-G", "--global-option=Visual Studio 14 2015"])
             msg = ("Compiling {}. This will take a while...\n"
                    "Please ignore the following UserWarning: "
                    "'Disabling all use of wheels...'".format(package))
@@ -702,7 +702,7 @@ class Tips():
             "docker build -t deepfakes-cpu -f Dockerfile.cpu .\n\n"
             "3. Mount faceswap volume and Run it\n"
             "# without GUI\n"
-            "docker run -p 8888:8888 \\ \n"
+            "docker run -tid -p 8888:8888 \\ \n"
             "\t--hostname deepfakes-cpu --name deepfakes-cpu \\ \n"
             "\t-v {path}:/srv \\ \n"
             "\tdeepfakes-cpu\n\n"
@@ -710,7 +710,7 @@ class Tips():
             "## enable local access to X11 server\n"
             "xhost +local:\n"
             "## create container\n"
-            "nvidia-docker run -p 8888:8888 \\ \n"
+            "nvidia-docker run -tid -p 8888:8888 \\ \n"
             "\t--hostname deepfakes-cpu --name deepfakes-cpu \\ \n"
             "\t-v {path}:/srv \\ \n"
             "\t-v /tmp/.X11-unix:/tmp/.X11-unix \\ \n"
@@ -721,7 +721,7 @@ class Tips():
             "\t-e UID=`id -u` \\ \n"
             "\tdeepfakes-cpu \n\n"
             "4. Open a new terminal to run faceswap.py in /srv\n"
-            "docker exec -it deepfakes-cpu bash".format(path=sys.path[0]))
+            "docker exec -it deepfakes-cpu bash".format(path=os.path.dirname(os.path.realpath(__file__))))
         self.output.info("That's all you need to do with a docker. Have fun.")
 
     def docker_cuda(self):
@@ -737,7 +737,7 @@ class Tips():
             "docker build -t deepfakes-gpu -f Dockerfile.gpu .\n\n"
             "5. Mount faceswap volume and Run it\n"
             "# without gui \n"
-            "docker run -p 8888:8888 \\ \n"
+            "docker run -tid -p 8888:8888 \\ \n"
             "\t--hostname deepfakes-gpu --name deepfakes-gpu \\ \n"
             "\t-v {path}:/srv \\ \n"
             "\tdeepfakes-gpu\n\n"
@@ -747,7 +747,7 @@ class Tips():
             "## enable nvidia device if working under bumblebee\n"
             "echo ON > /proc/acpi/bbswitch\n"
             "## create container\n"
-            "nvidia-docker run -p 8888:8888 \\ \n"
+            "nvidia-docker run -tid -p 8888:8888 \\ \n"
             "\t--hostname deepfakes-gpu --name deepfakes-gpu \\ \n"
             "\t-v {path}:/srv \\ \n"
             "\t-v /tmp/.X11-unix:/tmp/.X11-unix \\ \n"
@@ -758,7 +758,7 @@ class Tips():
             "\t-e UID=`id -u` \\ \n"
             "\tdeepfakes-gpu\n\n"
             "6. Open a new terminal to interact with the project\n"
-            "docker exec deepfakes-gpu python /srv/tools.py gui\n".format(path=sys.path[0]))
+            "docker exec deepfakes-gpu python /srv/tools.py gui\n".format(path=os.path.dirname(os.path.realpath(__file__))))
 
     def macos(self):
         """ Output Tips for macOS"""
@@ -780,7 +780,7 @@ class Tips():
     def pip(self):
         """ Pip Tips """
         self.output.info("1. Install PIP requirements\n"
-                         "You may want to execute `chcp 866` in cmd line\n"
+                         "You may want to execute `chcp 65001` in cmd line\n"
                          "to fix Unicode issues on Windows when installing dependencies")
 
 
